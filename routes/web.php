@@ -3,10 +3,13 @@
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Response;
 use App\Models\Download;
+use App\Http\Controllers\EarlyAccessController;
 
 Route::get('/', function () {
     return view('welcome');
 });
+
+Route::get('/prompt-builder', \App\Livewire\PromptBuilder::class)->name('prompt-builder');
 
 Route::get('/download/spbible', function () {
     // Track the download
@@ -24,3 +27,7 @@ Route::get('/download/spbible', function () {
         abort(404, 'File not found');
     }
 })->name('download.spbible');
+
+// Early Access Signup API Routes
+Route::post('/api/early-access/signup', [EarlyAccessController::class, 'store'])->name('early-access.signup');
+Route::get('/api/early-access/stats', [EarlyAccessController::class, 'stats'])->name('early-access.stats');
