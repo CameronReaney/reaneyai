@@ -2,11 +2,9 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\EarlyAccessSignup;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Validator;
-use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\Log;
 use MailchimpMarketing\ApiClient;
 
@@ -47,9 +45,10 @@ class EarlyAccessController extends Controller
                 return false;
             }
             
-            $response = $mailchimp->lists->addListMember($listId, [
+            // Try to add/update the subscriber
+            $response = $mailchimp->lists->setListMember($listId, md5(strtolower($email)), [
                 'email_address' => $email,
-                'status' => config('mailchimp.default_status', 'subscribed'),
+                'status_if_new' => config('mailchimp.default_status', 'subscribed'),
                 'tags' => ['early-access', 'reaneyai-launch'],
                 'merge_fields' => [
                     'SOURCE' => 'ReaneyAI Website',
@@ -57,15 +56,15 @@ class EarlyAccessController extends Controller
                 ]
             ]);
             
-            Log::info('Successfully added email to Mailchimp', [
+            Log::info('Successfully added/updated email in Mailchimp', [
                 'email' => $email,
-                'mailchimp_id' => $response->id ?? null
+                'mailchimp_id' => $response->id ?? null,
+                'status' => $response->status ?? null
             ]);
             
             return true;
             
         } catch (\Exception $e) {
-            // Don't fail the signup if Mailchimp fails
             Log::error('Failed to add email to Mailchimp', [
                 'email' => $email,
                 'error' => $e->getMessage()
@@ -93,41 +92,31 @@ class EarlyAccessController extends Controller
         }
 
         try {
-            // Save to database
-            $signup = EarlyAccessSignup::create([
-                'email' => $request->email,
-                'ip_address' => $request->ip(),
-                'user_agent' => $request->header('User-Agent'),
-            ]);
-
-            // Add to Mailchimp (non-blocking - won't fail if Mailchimp is down)
+            // Add to Mailchimp
             $mailchimpSuccess = $this->addToMailchimp($request->email);
             
-            $message = $mailchimpSuccess 
-                ? 'Thanks! We\'ll notify you when ReaneyAI Membership launches.'
-                : 'Thanks! We\'ll notify you when ReaneyAI Membership launches. (Note: Email saved locally)';
+            if ($mailchimpSuccess) {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Thanks! We\'ll notify you when ReaneyAI Membership launches.',
+                    'data' => [
+                        'email' => $request->email,
+                        'signup_date' => now()->format('Y-m-d H:i:s')
+                    ]
+                ], 201);
+            } else {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Unable to sign you up right now. Please try again later.',
+                ], 500);
+            }
 
-            return response()->json([
-                'success' => true,
-                'message' => $message,
-                'data' => [
-                    'email' => $signup->email,
-                    'signup_date' => $signup->created_at->format('Y-m-d H:i:s'),
-                    'mailchimp_synced' => $mailchimpSuccess
-                ]
-            ], 201);
-
-        } catch (UniqueConstraintViolationException $e) {
-            // Email already exists
-            return response()->json([
-                'success' => false,
-                'message' => 'This email is already signed up for early access.',
-            ], 409);
         } catch (\Exception $e) {
             // Log the error for debugging
             Log::error('Early access signup error', [
                 'email' => $request->email,
-                'error' => $e->getMessage()
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
             ]);
 
             return response()->json([
@@ -138,17 +127,33 @@ class EarlyAccessController extends Controller
     }
 
     /**
-     * Get signup statistics (optional admin feature)
+     * Get signup statistics from Mailchimp (optional admin feature)
      */
     public function stats(): JsonResponse
     {
-        $total = EarlyAccessSignup::count();
-        $recent = EarlyAccessSignup::where('created_at', '>=', now()->subDays(7))->count();
-        
-        return response()->json([
-            'total_signups' => $total,
-            'recent_signups' => $recent,
-            'last_signup' => EarlyAccessSignup::latest()->first()?->created_at
-        ]);
+        try {
+            $mailchimp = $this->getMailchimpClient();
+            $listId = config('mailchimp.list_id');
+            
+            if (!$mailchimp || !$listId) {
+                return response()->json([
+                    'error' => 'Mailchimp not configured'
+                ], 500);
+            }
+            
+            $list = $mailchimp->lists->getList($listId);
+            
+            return response()->json([
+                'total_signups' => $list->stats->member_count ?? 0,
+                'list_name' => $list->name ?? 'Unknown',
+                'last_updated' => now()->format('Y-m-d H:i:s')
+            ]);
+            
+        } catch (\Exception $e) {
+            return response()->json([
+                'error' => 'Unable to fetch stats',
+                'message' => $e->getMessage()
+            ], 500);
+        }
     }
 }
